@@ -30,9 +30,7 @@ Sys.setenv(
   GDAL_HTTP_MERGE_CONSECUTIVE_RANGES = "YES"
 )
 
-# ---- Terra temp folder (optional, helps when disk is tight) ----
-dir.create("~/terra_tmp", showWarnings = FALSE)
-terraOptions(tempdir = "~/terra_tmp", progress = 1)
+
 
 # ---- 0) Packages & folders ---------------------------------------------------
 pkgs <- c(
@@ -41,6 +39,7 @@ pkgs <- c(
   "WDI","geodata","tidyr","tibble","rlang","curl"
 )
 
+
 to_install <- pkgs[!pkgs %in% installed.packages()[,"Package"]]
 if(length(to_install)) install.packages(to_install)
 invisible(lapply(pkgs, library, character.only = TRUE))
@@ -48,6 +47,10 @@ invisible(lapply(pkgs, library, character.only = TRUE))
 `%||%` <- function(x, y) if(is.null(x) || length(x) == 0 || all(is.na(x))) y else x
 
 options(timeout = 600)
+
+# ---- Terra temp folder (optional, helps when disk is tight) ----
+dir.create("~/terra_tmp", showWarnings = FALSE)
+terraOptions(tempdir = "~/terra_tmp", progress = 1)
 
 dir.create("data", showWarnings = FALSE)
 dir.create("data/admin", showWarnings = FALSE, recursive = TRUE)
@@ -580,16 +583,20 @@ tmap_mode("plot")
 phl_map <- phl_adm2_m |>
   dplyr::left_join(final_tbl, by = c("GID_2","NAME_1","NAME_2"))
 
-p1 <- tm_shape(gmw_frac_1km) + tm_raster(title=paste0("Mangrove fraction (", res_km, ")")) +
+p1 <- tm_shape(mangrove_presence_1km) +
+  tm_raster(style="cat", title="Mangroves present (1km)") +
   tm_shape(coastal_zone_m) + tm_borders(lwd=1) +
-  tm_layout(main.title="Mangrove cover (fraction) in coastal belt")
+  tm_layout(main.title="Mangrove presence in coastal belt")
 
 p2 <- tm_shape(scenario$no_mangroves[[rp_focus]]) + tm_raster(title=paste0("Flood depth (m), RP", rp_focus)) +
   tm_shape(coastal_zone_m) + tm_borders(lwd=1) +
   tm_layout(main.title=paste0("Coastal inundation depth (RP", rp_focus, ", baseline)"))
 
-p3 <- tm_shape(phl_map) + tm_polygons("EAD_avoided_usd", style="quantile", n=5,
-                                      title="Avoided EAD (USD/yr)") +
+p3 <- tm_shape(phl_map) +
+  tm_polygons("EAD_avoided_usd",
+              style="fixed",
+              breaks=c(0, 1, 1e3, 1e4, 1e5, 1e6, 1e7, Inf),
+              title="Avoided EAD (USD/yr)") +
   tm_layout(main.title="Annual expected damages avoided by mangrove protection")
 
 # Use base png device (no Cairo)

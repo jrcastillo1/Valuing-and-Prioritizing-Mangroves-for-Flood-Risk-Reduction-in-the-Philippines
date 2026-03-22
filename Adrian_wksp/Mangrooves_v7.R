@@ -26,7 +26,7 @@ COASTAL_KM       <- 20      # coastal belt width in km (PDF: 20 km)
 # =========================
 pkgs <- c(
   "sf","terra","dplyr","purrr","stringr","exactextractr",
-  "jsonlite","httr","readr","tmap","WDI","geodata","tidyr","tibble","rlang","curl"
+  "jsonlite","httr","readr","tmap","WDI","geodata","tidyr","tibble","rlang","curl", "ggplot2"
 )
 to_install <- pkgs[!pkgs %in% installed.packages()[,"Package"]]
 if(length(to_install)) install.packages(to_install)
@@ -520,6 +520,14 @@ final_tbl <- cba_tbl |>
 
 readr::write_csv(final_tbl, "outputs/municipality_mangrove_flood_cba.csv")
 
+# --- Top 20 municipalities by BCR ---------------------------------------
+
+top20 <- final_tbl |>
+  dplyr::arrange(desc(BCR_low)) |>
+  dplyr::slice(1:20)
+
+readr::write_csv(top20, "outputs/top20_bcr_municipalities.csv")
+
 # =========================
 # 10) DISTRIBUTIONAL ANALYSIS (PDF 4.6)
 # =========================
@@ -555,7 +563,7 @@ message(sprintf("Share of avoided EAD accruing to bottom 40%% (ntl/capita proxy)
 if (MAKE_MAPS) {
   tmap::tmap_mode("plot")
   
-  # --- A) Prepare cleaner layers --------------------------------------------
+  # --- Prepare cleaner layers --------------------------------------------
   phl_outline <- phl_adm1_m |> sf::st_union() |> sf::st_as_sf() |> sf::st_simplify(dTolerance = 2000)
   coastal_outline <- coastal_zone_m |> sf::st_union() |> sf::st_as_sf() |> sf::st_simplify(dTolerance = 1000)
   
@@ -569,7 +577,7 @@ if (MAKE_MAPS) {
     dplyr::left_join(final_tbl, by = c("GID_2","NAME_1","NAME_2"))
   phl_map$EAD_avoided_usd <- pmax(phl_map$EAD_avoided_usd, 0)
   
-  # --- B) Layout: move legend to the right OUTSIDE (no overlap) ----------------
+  # --- Layout: move legend to the right OUTSIDE (no overlap) ----------------
   layout_common <- tm_layout(
     frame = FALSE,
     legend.outside = TRUE,                 # <-- changed
@@ -593,7 +601,7 @@ if (MAKE_MAPS) {
   border_coast_lwd <- 0.8      # was 1.0
   border_coast_col <- "grey55"
   
-  # --- C) Map 1: Mangroves presence -----------------------------------------
+  # --- Map 1: Mangroves presence -----------------------------------------
   p1 <- tm_shape(phl_outline) +
     tm_borders(lwd = border_main_lwd, col = border_main_col) +
     tm_shape(coastal_outline) +
@@ -610,7 +618,7 @@ if (MAKE_MAPS) {
     layout_common +
     tm_layout(main.title = paste0("Mangrove presence in coastal belt (\\tau=", tau, ")"))
   
-  # --- D) Map 2: Flood depth RP10 --------------------------------------------
+  # --- Map 2: Flood depth RP10 --------------------------------------------
   flood_breaks <- c(0, 0.5, 1, 2, 4, 6, 10, Inf)
   
   p2 <- tm_shape(phl_outline) +
@@ -628,8 +636,73 @@ if (MAKE_MAPS) {
     tm_scale_bar(position = scale_pos, text.size = 0.65) +
     layout_common +
     tm_layout(main.title = paste0("Coastal inundation depth (RP", RP_FOCUS, ", baseline)"))
+
+  # --- Map 3: Multi-RP flood hazard -----------------------
+  rp_maps <- lapply(c(2,10,50,250), function(rp) {
+    r <- scenario$no_mangroves[[as.character(rp)]]
+    r <- terra::ifel(r <= 0, NA, r)
+    names(r) <- paste0("RP", rp)
+    r
+  })
+
+  rp_stack <- terra::rast(rp_maps)
+
+  p2b <- tm_shape(phl_outline) +
+    tm_borders(lwd = border_main_lwd, col = border_main_col) +
+    tm_shape(rp_stack) +
+    tm_raster(
+      style = "fixed",
+      breaks = flood_breaks,
+      title = "Flood depth (m)"
+    ) +
+    tm_facets(ncol = 2) +
+    layout_common +
+    tm_layout(main.title = "Flood hazard across return periods (no mangroves)")
+
+  save_tmap_png(p2b, "outputs/map_flood_multi_rp.png")
+
+  # --- Map 4: Exposure maps (population + NTL, with/without mangroves) ------------
+
+  make_exposure_raster <- function(depth_r, var_r, h=h0) {
+    flooded <- depth_r > h
+    var_r * flooded
+  }
+
+  pop_nomang_map <- make_exposure_raster(scenario$no_mangroves[[rp_focus_chr]], pop_m)
+  pop_with_map   <- make_exposure_raster(scenario$with_mangroves[[rp_focus_chr]], pop_m)
+
+  ntl_nomang_map <- make_exposure_raster(scenario$no_mangroves[[rp_focus_chr]], ntl_m)
+  ntl_with_map   <- make_exposure_raster(scenario$with_mangroves[[rp_focus_chr]], ntl_m)
+
+  exp_stack <- c(pop_nomang_map, ntl_nomang_map, pop_with_map, ntl_with_map)
+  names(exp_stack) <- c("Pop NoMang", "NTL NoMang", "Pop WithMang", "NTL WithMang")
+
+  p_exp <- tm_shape(exp_stack) +
+    tm_raster(style="quantile") +
+    tm_facets(ncol=2) +
+    layout_common +
+    tm_layout(main.title="Exposure to flooding (population and economic activity)")
+
+  save_tmap_png(p_exp, "outputs/map_exposure.png")
+
+  # --- Map 5: Expected annual damages maps ---------------------------------------
+
+  phl_map$EAD_nomang_10k <- phl_map$EAD_nomang_usd / 1e4
+  phl_map$EAD_with_10k   <- phl_map$EAD_with_usd / 1e4
+
+  p_ead_compare <- tm_shape(phl_outline) +
+    tm_borders(lwd = border_main_lwd, col = border_main_col) +
+    tm_shape(phl_map) +
+    tm_polygons(c("EAD_nomang_10k","EAD_with_10k"),
+                style="quantile",
+                title="EAD (10k USD/yr)") +
+    tm_facets(ncol=2) +
+    layout_common +
+    tm_layout(main.title="Expected annual damages: with vs without mangroves")
+
+  save_tmap_png(p_ead_compare, "outputs/map_ead_compare.png")
   
-  # --- E) Map 3: Avoided EAD (clean legend, fewer digits) ---------------------
+  # --- Map 6: Avoided EAD (clean legend, fewer digits) ---------------------
   phl_map$EAD_avoided_10k <- phl_map$EAD_avoided_usd / 1e4
   ead10k_breaks <- c(0, 0.1, 1, 10, 50, 200, Inf)
   
@@ -651,6 +724,42 @@ if (MAKE_MAPS) {
     layout_common +
     tm_layout(main.title = paste0("Avoided EAD (\\alpha=", alpha0, ", L=", L0, "m, K/Y=", K_Y, ")"))
   
+  # --- Map 7: BCR map (low-cost scenario) ----------------------------------------
+
+  phl_map$BCR_low <- final_tbl$BCR_low
+
+  p_bcr <- tm_shape(phl_outline) +
+    tm_borders(lwd = border_main_lwd, col = border_main_col) +
+    tm_shape(phl_map) +
+    tm_polygons("BCR_low",
+                style="quantile",
+                title="BCR (low cost)") +
+    layout_common +
+    tm_layout(main.title="Benefit-cost ratio (low restoration cost scenario)")
+
+  save_tmap_png(p_bcr, "outputs/map_bcr_low.png")
+
+  # --- NEW: Distributional scatter plots ---------------------------------------
+
+  p_ntl <- ggplot(dist_tbl, aes(x = ntl_pc, y = EAD_avoided_usd)) +
+    geom_point(alpha=0.5) +
+    scale_x_continuous(trans="log1p") +
+    scale_y_continuous(trans="log1p") +
+    labs(title="Avoided EAD vs NTL per capita",
+        x="NTL per capita",
+        y="Avoided EAD (USD)")
+
+  p_pop <- ggplot(dist_tbl, aes(x = pop_sum, y = EAD_avoided_usd)) +
+    geom_point(alpha=0.5) +
+    scale_x_continuous(trans="log1p") +
+    scale_y_continuous(trans="log1p") +
+    labs(title="Avoided EAD vs population",
+        x="Population",
+        y="Avoided EAD (USD)")
+
+  ggsave("outputs/dist_ntl.png", p_ntl, width=6, height=5)
+  ggsave("outputs/dist_pop.png", p_pop, width=6, height=5)
+
   # --- F) Save (base PNG) ----------------------------------------------------
   save_tmap_png <- function(tm_obj, filename, width = 2200, height = 1400, res = 300) {
     dir.create(dirname(filename), showWarnings = FALSE, recursive = TRUE)
